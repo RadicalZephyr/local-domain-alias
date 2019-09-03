@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{self, prelude::*},
     net::IpAddr,
 };
@@ -8,10 +8,10 @@ use std::{
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alphanumeric1, digit1, hex_digit1, space1},
+    character::complete::{alphanumeric1, digit1, hex_digit1, one_of, space1},
     combinator::{map_res, opt, recognize, rest},
     error::{make_error, ErrorKind, ParseError, VerboseError},
-    multi::{many_m_n, separated_list},
+    multi::{many1, many_m_n, separated_list},
     sequence::{preceded, tuple},
     Err, IResult,
 };
@@ -60,7 +60,7 @@ fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, IpAdd
 }
 
 fn hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
-    let (input, hostname) = alphanumeric1(input)?;
+    let (input, hostname) = recognize(many1(alt((alphanumeric1, recognize(one_of(".-"))))))(input)?;
     if let Some(first_char) = hostname.chars().nth(0) {
         if !first_char.is_alphabetic() {
             return Err(Err::Error(make_error(&hostname[0..1], ErrorKind::Alpha)));
@@ -95,19 +95,29 @@ impl fmt::Display for HostsLine {
             aliases,
             comment,
         } = self;
-        let aliases = aliases.join(" ");
-        let ret = write! {
-            f, "{ip} {ch} {aliases}",
+
+        let sep = match ip.to_string().chars().count() {
+            0..=8 => "\t\t",
+            7..=16 => "\t",
+            _ => " ",
+        };
+
+        write!(
+            f,
+            "{ip}{sep}{ch}",
             ip = ip,
+            sep = sep,
             ch = canonical_hostname,
-            aliases = aliases,
-        }?;
+        )?;
+
+        if !aliases.is_empty() {
+            write!(f, "\t{}", aliases.join(" "))?;
+        }
 
         if let Some(comment) = comment {
-            write!(f, "#{}", comment)
-        } else {
-            Ok(ret)
+            write!(f, "#{}", comment)?;
         }
+        Ok(())
     }
 }
 
@@ -157,14 +167,30 @@ fn parse_line(line: &str) -> Line {
 
 fn run() -> io::Result<()> {
     let options = Options::from_args();
-    let mut file = OpenOptions::new().read(true).write(true).open(HOSTS_FILE)?;
+
+    let mut file = File::open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
     let reader = io::BufReader::new(file);
 
-    let lines: Vec<_> = reader
+    let mut lines: Vec<_> = reader
         .lines()
         .map(|line_res| line_res.map(|line| parse_line(&line)))
         .collect::<Result<Vec<_>, io::Error>>()?;
+
+    let mut file = OpenOptions::new().write(true).open(HOSTS_FILE)?;
+    file.seek(io::SeekFrom::Start(0))?;
+
+    let localhost: IpAddr = "127.0.0.1".parse().unwrap();
+
+    for line in &mut lines {
+        if let Line::Structured(hosts_line) = line {
+            if hosts_line.ip == localhost {
+                hosts_line.aliases.push(options.alias.clone());
+            }
+        }
+        writeln!(file, "{}", line)?;
+    }
+
     Ok(())
 }
 
