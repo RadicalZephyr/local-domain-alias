@@ -199,17 +199,19 @@ fn write_iptables_rules(options: &Options) -> io::Result<()> {
             "-t",
             "nat",
             "--append",
-            "PREROUTING",
+            "OUTPUT",
             "--protocol",
             "tcp",
             "--dport",
             "80",
+            "--source",
+            "127.0.0.1",
             "--destination",
             &options.alias,
             "--jump",
-            "REDIRECT",
-            "--to-port",
-            &options.port.to_string(),
+            "DNAT",
+            "--to-destination",
+            &format!("127.0.0.1:{}", options.port),
         ])
         .status()?;
     if !status.success() {
@@ -219,28 +221,6 @@ fn write_iptables_rules(options: &Options) -> io::Result<()> {
         );
     }
 
-    let status = Command::new("iptables")
-        .args(&[
-            "-t",
-            "nat",
-            "--append",
-            "OUTPUT",
-            "--protocol",
-            "tcp",
-            "--destination",
-            &options.alias,
-            "--jump",
-            "DNAT",
-            "--to-destination",
-            "127.0.0.1",
-        ])
-        .status()?;
-    if !status.success() {
-        eprintln!(
-            "iptables destination re-writing command errored {}",
-            status.code().unwrap_or(-1)
-        );
-    }
     Ok(())
 }
 
@@ -285,6 +265,11 @@ fn run() -> io::Result<()> {
             .collect();
         let ip = next_unused_local_ip(&in_use_ips);
         lines.push(Line::structured(ip, options.alias.clone()));
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "alias already in use",
+        ));
     }
 
     for line in &lines {
@@ -302,7 +287,7 @@ fn main() {
     match run() {
         Ok(()) => {}
         Err(err) => {
-            println!("Error: {}", err);
+            eprintln!("local-domain-alias: error: {}", err);
             std::process::exit(1);
         }
     }
