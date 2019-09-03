@@ -12,10 +12,10 @@ use failure::Fail;
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alphanumeric1, digit1, hex_digit1, one_of, space1},
+    character::complete::{alpha1, alphanumeric1, digit1, hex_digit1, one_of, space1},
     combinator::{all_consuming, map_res, opt, recognize, rest},
-    error::{convert_error, make_error, ErrorKind, ParseError, VerboseError},
-    multi::{many1, many_m_n, separated_list},
+    error::{convert_error, ErrorKind, ParseError, VerboseError},
+    multi::{many0, many_m_n, separated_list},
     sequence::{preceded, tuple},
     Err, IResult,
 };
@@ -94,13 +94,10 @@ fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, IpAdd
 }
 
 fn hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
-    let (input, hostname) = recognize(many1(alt((alphanumeric1, recognize(one_of(".-"))))))(input)?;
-    if let Some(first_char) = hostname.chars().nth(0) {
-        if !first_char.is_alphabetic() {
-            return Err(Err::Error(make_error(&hostname[0..1], ErrorKind::Alpha)));
-        }
-    }
-    Ok((input, hostname))
+    recognize(tuple((
+        alpha1,
+        many0(alt((alphanumeric1, recognize(one_of("-"))))),
+    )))(input)
 }
 
 fn check_hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, (), E> {
@@ -108,7 +105,6 @@ fn check_hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str
 }
 
 fn aliases<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Vec<String>, E> {
-    let (input, _) = space1(input)?;
     let (input, aliases) = separated_list(tag(" "), hostname)(input)?;
     Ok((input, aliases.into_iter().map(String::from).collect()))
 }
@@ -176,6 +172,7 @@ fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Ho
     let (input, ip) = ip_addr(input)?;
     let (input, _) = space1(input)?;
     let (input, canonical_hostname) = hostname(input)?;
+    let (input, _) = space1(input)?;
     let (input, aliases) = opt(aliases)(input)?;
     let (input, comment) = opt(comment)(input)?;
 
@@ -336,16 +333,72 @@ fn main() {
 mod tests {
     use super::*;
 
+    macro_rules! assert_parse_err {
+        { $fn_name:ident($input:literal), rest == $expected_rest:literal } => {
+            match $fn_name::<VerboseError<&str>>($input) {
+                Ok((rest, value)) => {
+                    assert_eq!($expected_rest, rest, "actual unparsed input");
+                    panic!("parse unexpectedly succeeded: {ifn}({iarg}) rest: '{rest}', value: '{value:?}'",
+                               ifn = stringify!($fn_name),
+                               iarg = stringify!($input),
+                               rest = rest,
+                               value = value,
+                    );
+                }
+                Err(err) => err,
+            }
+        }
+    }
+
+    macro_rules! assert_parse_ok {
+        { $fn_name:ident($input:literal) } => {
+            match $fn_name::<VerboseError<&str>>($input) {
+                Err(Err::Incomplete(i)) =>
+                    panic!("incomplete input: '{}' {:?}", $input, i),
+                Err(Err::Error(e)) | Err(Err::Failure(e)) => {
+                    panic!("failed to parse: {ifn}({iarg})\n{converted}",
+                           ifn = stringify!($fn_name),
+                           iarg = stringify!($input),
+                           converted = convert_error($input, e));
+                },
+                Ok(ret) => ret,
+            }
+        }
+    }
+
     #[test]
     fn parse_hostname() {
-        assert!(hostname::<(&str, ErrorKind)>("123").is_err());
-        assert!(hostname::<(&str, ErrorKind)>("a123").is_ok());
-        assert!(hostname::<(&str, ErrorKind)>("abc def").is_ok());
+        assert_parse_err!(hostname("123"), rest == "");
+        assert_parse_ok!(hostname("a123"));
+        assert_parse_ok!(hostname("abc"));
+        assert_parse_ok!(hostname("abc.def"));
+        assert_parse_ok!(hostname("abc-def"));
+        assert_parse_ok!(hostname("abc-def.ghi"));
     }
 
     #[test]
     fn parse_check_hostname() {
-        assert!(check_hostname::<(&str, ErrorKind)>("abc def").is_err());
-        assert!(check_hostname::<(&str, ErrorKind)>("abc-def").is_ok());
+        assert_parse_err!(check_hostname("123"), rest == "");
+        assert_parse_ok!(check_hostname("a123"));
+        assert_parse_ok!(check_hostname("abc"));
+        assert_parse_ok!(check_hostname("abc-def"));
+        assert_parse_ok!(hostname("abc.def"));
+        assert_parse_ok!(hostname("abc-def.ghi"));
+    }
+
+    #[test]
+    fn parse_aliases() {
+        assert_parse_ok!(aliases("123"));
+        assert_parse_ok!(aliases("a123"));
+        assert_parse_ok!(aliases("abc"));
+    }
+
+    #[test]
+    fn parse_comment() {
+        assert_parse_err!(comment("123"), rest == "123");
+        assert_parse_err!(comment(""), rest == "");
+        assert_parse_ok!(comment("#"));
+        assert_parse_ok!(comment("#abc 123 !@# {}()[]"));
+        assert_parse_ok!(comment("#abc123!@#\nfoobar"));
     }
 }
