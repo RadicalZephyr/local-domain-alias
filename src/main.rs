@@ -231,10 +231,13 @@ fn write_iptables_rules(options: &Options) -> io::Result<()> {
         ])
         .status()?;
     if !status.success() {
-        eprintln!(
-            "iptables port mapping command errored {}",
-            status.code().unwrap_or(-1)
-        );
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "iptables port mapping command errored {}",
+                status.code().unwrap_or(-1)
+            ),
+        ));
     }
 
     Ok(())
