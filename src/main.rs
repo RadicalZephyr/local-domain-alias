@@ -1,5 +1,4 @@
 use std::{
-    error::Error,
     fmt,
     fs::OpenOptions,
     io::{self, prelude::*},
@@ -11,7 +10,7 @@ use nom::{
     bytes::complete::tag,
     character::complete::{alphanumeric1, digit1, hex_digit1, space1},
     combinator::{map_res, opt, recognize, rest},
-    error::{convert_error, make_error, ErrorKind, ParseError, VerboseError},
+    error::{make_error, ErrorKind, ParseError, VerboseError},
     multi::{many_m_n, separated_list},
     sequence::{preceded, tuple},
     Err, IResult,
@@ -21,33 +20,6 @@ use structopt::StructOpt;
 
 static HOSTS_FILE: &str = "hosts";
 
-#[derive(Debug)]
-struct NomError {
-    error_trace: String,
-}
-
-impl NomError {
-    fn new(error_trace: String) -> NomError {
-        NomError { error_trace }
-    }
-}
-
-impl fmt::Display for NomError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "parsing error: {}", self.error_trace)
-    }
-}
-
-impl Error for NomError {
-    fn description(&self) -> &str {
-        "NomError"
-    }
-
-    fn cause(&self) -> Option<&dyn Error> {
-        None
-    }
-}
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "local-domain-alias")]
 struct Options {
@@ -56,13 +28,6 @@ struct Options {
 
     #[structopt(name = "alias")]
     alias: String,
-}
-
-#[derive(Debug)]
-struct Line {
-    ip: IpAddr,
-    canonical_hostname: String,
-    aliases: Vec<String>,
 }
 
 fn octet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u8, E> {
@@ -110,40 +75,84 @@ fn aliases<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Vec<S
     Ok((input, aliases.into_iter().map(String::from).collect()))
 }
 
-fn comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, (), E> {
-    let (input, _) = preceded(tag("#"), rest)(input)?;
-    Ok((input, ()))
+fn comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
+    preceded(tag("#"), rest)(input)
 }
 
-fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Line, E> {
+#[derive(Debug)]
+struct HostsLine {
+    ip: IpAddr,
+    canonical_hostname: String,
+    aliases: Vec<String>,
+    comment: Option<String>,
+}
+
+impl fmt::Display for HostsLine {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let HostsLine {
+            ip,
+            canonical_hostname,
+            aliases,
+            comment,
+        } = self;
+        let aliases = aliases.join(" ");
+        let ret = write! {
+            f, "{ip} {ch} {aliases}",
+            ip = ip,
+            ch = canonical_hostname,
+            aliases = aliases,
+        }?;
+
+        if let Some(comment) = comment {
+            write!(f, "#{}", comment)
+        } else {
+            Ok(ret)
+        }
+    }
+}
+
+fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, HostsLine, E> {
     let (input, ip) = ip_addr(input)?;
     let (input, _) = space1(input)?;
     let (input, canonical_hostname) = hostname(input)?;
     let (input, aliases) = opt(aliases)(input)?;
-    let (input, _) = opt(comment)(input)?;
+    let (input, comment) = opt(comment)(input)?;
 
     let canonical_hostname = String::from(canonical_hostname);
     let aliases = aliases.unwrap_or_else(Vec::new);
+    let comment = comment.map(String::from);
     Ok((
         input,
-        Line {
+        HostsLine {
             ip,
             canonical_hostname,
             aliases,
+            comment,
         },
     ))
 }
 
-fn parse_line(line: &str) -> io::Result<Line> {
-    let (_, line) = hosts_line::<VerboseError<&str>>(&line).map_err(|e| match e {
-        Err::Incomplete(_) => io::Error::from(io::ErrorKind::NotFound),
-        Err::Error(e) | Err::Failure(e) => io::Error::new(
-            io::ErrorKind::NotFound,
-            NomError::new(convert_error(&line, e)),
-        ),
-    })?;
+#[derive(Debug)]
+enum Line {
+    Unstructured(String),
+    Structured(HostsLine),
+}
 
-    Ok(line)
+impl fmt::Display for Line {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Line::Unstructured(line) => write!(f, "{}", line),
+            Line::Structured(hosts_line) => write!(f, "{}", hosts_line),
+        }
+    }
+}
+
+fn parse_line(line: &str) -> Line {
+    match hosts_line::<VerboseError<&str>>(&line) {
+        Ok((_, hosts_line)) => Line::Structured(hosts_line),
+        Err(_error) => Line::Unstructured(String::from(line)),
+        // Err::Error(_) | Err::Failure(_) => Line::Unstructured(String::from(line)),
+    }
 }
 
 fn run() -> io::Result<()> {
@@ -151,15 +160,11 @@ fn run() -> io::Result<()> {
     let mut file = OpenOptions::new().read(true).write(true).open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
     let reader = io::BufReader::new(file);
-    for line in reader.lines() {
-        let line: String = line?;
-        match parse_line(&line) {
-            Ok(host_line) => {
-                dbg!(&host_line);
-            }
-            Err(e) => println!("error parsing line: '{}'\n{}", line, e),
-        }
-    }
+
+    let lines: Vec<_> = reader
+        .lines()
+        .map(|line_res| line_res.map(|line| parse_line(&line)))
+        .collect::<Result<Vec<_>, io::Error>>()?;
     Ok(())
 }
 
