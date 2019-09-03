@@ -7,6 +7,8 @@ use std::{
     process::Command,
 };
 
+use failure::Fail;
+
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -30,6 +32,36 @@ struct Options {
 
     #[structopt(name = "alias")]
     alias: String,
+}
+
+#[derive(Debug, Fail)]
+enum Error {
+    #[fail(display = "alias is already in use")]
+    AliasAlreadyInUse,
+
+    #[fail(display = "incomplete alias")]
+    IncompleteAlias,
+
+    #[fail(display = "invalid alias format\n{}", _0)]
+    InvalidAliasFormat(String),
+
+    #[fail(display = "could not set up port forwarding: ip tables error {}", _0)]
+    IptablesCommandFailed(i32),
+
+    #[fail(display = "must be run as root")]
+    MustRunAsRoot,
+
+    #[fail(display = "io error: {}", _0)]
+    IoError(io::Error),
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Error {
+        match error.kind() {
+            io::ErrorKind::PermissionDenied => Error::MustRunAsRoot,
+            _e => Error::IoError(dbg!(error)),
+        }
+    }
 }
 
 fn octet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u8, E> {
@@ -197,19 +229,16 @@ fn parse_line(line: &str) -> Line {
     }
 }
 
-fn validate_alias(alias: &str) -> io::Result<()> {
+fn validate_alias(alias: &str) -> Result<(), Error> {
     check_hostname::<VerboseError<&str>>(alias)
         .map(|_| ())
         .map_err(|error| match error {
-            Err::Incomplete(_) => io::Error::new(io::ErrorKind::InvalidInput, "input incomplete"),
-            Err::Error(e) | Err::Failure(e) => io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid alias format\n{}", convert_error(alias, e)),
-            ),
+            Err::Incomplete(_) => Error::IncompleteAlias,
+            Err::Error(e) | Err::Failure(e) => Error::InvalidAliasFormat(convert_error(alias, e)),
         })
 }
 
-fn write_iptables_rules(options: &Options) -> io::Result<()> {
+fn write_iptables_rules(options: &Options) -> Result<(), Error> {
     let status = Command::new("iptables")
         .args(&[
             "-t",
@@ -231,13 +260,7 @@ fn write_iptables_rules(options: &Options) -> io::Result<()> {
         ])
         .status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "iptables port mapping command errored {}",
-                status.code().unwrap_or(-1)
-            ),
-        ));
+        return Err(Error::IptablesCommandFailed(status.code().unwrap_or(-1)));
     }
 
     Ok(())
@@ -257,7 +280,7 @@ fn next_unused_local_ip(in_use_ips: &HashSet<IpAddr>) -> IpAddr {
     "127.0.0.1".parse().unwrap()
 }
 
-fn run() -> io::Result<()> {
+fn run() -> Result<(), Error> {
     let options = Options::from_args();
     validate_alias(&options.alias)?;
 
@@ -286,10 +309,7 @@ fn run() -> io::Result<()> {
         let ip = next_unused_local_ip(&in_use_ips);
         lines.push(Line::structured(ip, options.alias.clone()));
     } else {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "alias already in use",
-        ));
+        return Err(Error::AliasAlreadyInUse);
     }
 
     for line in &lines {
@@ -307,7 +327,7 @@ fn main() {
     match run() {
         Ok(()) => {}
         Err(err) => {
-            eprintln!("local-domain-alias: error: {}", err);
+            eprintln!("local-domain-alias: {}", err);
             std::process::exit(1);
         }
     }
