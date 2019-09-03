@@ -3,14 +3,16 @@ use std::{
     fmt,
     fs::OpenOptions,
     io::{self, prelude::*},
-    net::Ipv4Addr,
+    net::IpAddr,
 };
 
 use nom::{
+    branch::alt,
     bytes::complete::tag,
-    character::complete::{digit1, space1},
-    combinator::map_res,
+    character::complete::{digit1, hex_digit1, space1},
+    combinator::{map_res, opt, recognize},
     error::{convert_error, ParseError, VerboseError},
+    multi::many_m_n,
     sequence::{preceded, tuple},
     Err, IResult,
 };
@@ -58,7 +60,7 @@ struct Options {
 
 #[derive(Debug)]
 struct Line {
-    ip: Ipv4Addr,
+    ip: IpAddr,
 }
 
 fn octet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u8, E> {
@@ -69,9 +71,25 @@ fn dotted_octet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, 
     preceded(tag("."), octet)(input)
 }
 
-fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Ipv4Addr, E> {
-    let (input, (a, b, c, d)) = tuple((octet, dotted_octet, dotted_octet, dotted_octet))(input)?;
-    Ok((input, Ipv4Addr::new(a, b, c, d)))
+fn ip_v4_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
+    recognize(tuple((octet, dotted_octet, dotted_octet, dotted_octet)))(input)
+}
+
+fn hextet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u16, E> {
+    map_res(hex_digit1, |s: &str| s.parse::<u16>())(input)
+}
+
+fn sep_hextet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u16, E> {
+    preceded(tag("::"), hextet)(input)
+}
+
+fn ip_v6_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
+    let parser = preceded(opt(hextet), many_m_n(1, 7, sep_hextet));
+    recognize(parser)(input)
+}
+
+fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, IpAddr, E> {
+    map_res(alt((ip_v4_addr, ip_v6_addr)), |s: &str| s.parse::<IpAddr>())(input)
 }
 
 fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Line, E> {
