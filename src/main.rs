@@ -1,8 +1,10 @@
 use std::{
+    collections::HashSet,
     fmt,
     fs::{File, OpenOptions},
     io::{self, prelude::*},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
+    process::Command,
 };
 
 use nom::{
@@ -18,7 +20,7 @@ use nom::{
 
 use structopt::StructOpt;
 
-static HOSTS_FILE: &str = "hosts";
+static HOSTS_FILE: &str = "/etc/hosts";
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "local-domain-alias")]
@@ -87,6 +89,19 @@ struct HostsLine {
     comment: Option<String>,
 }
 
+impl HostsLine {
+    fn new(ip: IpAddr, canonical_hostname: String) -> HostsLine {
+        let aliases = Vec::new();
+        let comment = None;
+        HostsLine {
+            ip,
+            canonical_hostname,
+            aliases,
+            comment,
+        }
+    }
+}
+
 impl fmt::Display for HostsLine {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let HostsLine {
@@ -148,6 +163,19 @@ enum Line {
     Structured(HostsLine),
 }
 
+impl Line {
+    fn structured(ip: IpAddr, canonical_name: String) -> Line {
+        Line::Structured(HostsLine::new(ip, canonical_name))
+    }
+
+    fn structured_ref(&self) -> Option<&HostsLine> {
+        match self {
+            Line::Structured(line) => Some(line),
+            Line::Unstructured(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for Line {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -165,6 +193,71 @@ fn parse_line(line: &str) -> Line {
     }
 }
 
+fn write_iptables_rules(options: &Options) -> io::Result<()> {
+    let status = Command::new("iptables")
+        .args(&[
+            "-t",
+            "nat",
+            "--append",
+            "PREROUTING",
+            "--protocol",
+            "tcp",
+            "--dport",
+            "80",
+            "--destination",
+            &options.alias,
+            "--jump",
+            "REDIRECT",
+            "--to-port",
+            &options.port.to_string(),
+        ])
+        .status()?;
+    if !status.success() {
+        eprintln!(
+            "iptables port mapping command errored {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    let status = Command::new("iptables")
+        .args(&[
+            "-t",
+            "nat",
+            "--append",
+            "OUTPUT",
+            "--protocol",
+            "tcp",
+            "--destination",
+            &options.alias,
+            "--jump",
+            "DNAT",
+            "--to-destination",
+            "127.0.0.1",
+        ])
+        .status()?;
+    if !status.success() {
+        eprintln!(
+            "iptables destination re-writing command errored {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+    Ok(())
+}
+
+fn next_unused_local_ip(in_use_ips: &HashSet<IpAddr>) -> IpAddr {
+    for b in 0..128 {
+        for c in 0..128 {
+            for d in 1..128 {
+                let ip = IpAddr::V4(Ipv4Addr::new(127, b, c, d));
+                if !in_use_ips.contains(&ip) {
+                    return ip;
+                }
+            }
+        }
+    }
+    "127.0.0.1".parse().unwrap()
+}
+
 fn run() -> io::Result<()> {
     let options = Options::from_args();
 
@@ -180,16 +273,27 @@ fn run() -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
 
-    let localhost: IpAddr = "127.0.0.1".parse().unwrap();
+    if lines
+        .iter()
+        .filter_map(|line| line.structured_ref())
+        .find(|&x| *x.canonical_hostname == options.alias)
+        .is_none()
+    {
+        let in_use_ips: HashSet<IpAddr> = lines
+            .iter()
+            .filter_map(|line| line.structured_ref().map(|line| line.ip))
+            .collect();
+        let ip = next_unused_local_ip(&in_use_ips);
+        lines.push(Line::structured(ip, options.alias.clone()));
+    }
 
-    for line in &mut lines {
-        if let Line::Structured(hosts_line) = line {
-            if hosts_line.ip == localhost {
-                hosts_line.aliases.push(options.alias.clone());
-            }
-        }
+    for line in &lines {
         writeln!(file, "{}", line)?;
     }
+    file.sync_all()?;
+    drop(file);
+
+    write_iptables_rules(&options)?;
 
     Ok(())
 }
