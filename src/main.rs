@@ -79,6 +79,17 @@ fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Li
     Ok((input, Line { ip }))
 }
 
+fn parse_line(line: &str) -> io::Result<Line> {
+    let (_, line) = hosts_line::<VerboseError<&str>>(&line).map_err(|e| match e {
+        Err::Incomplete(_) => io::Error::from(io::ErrorKind::NotFound),
+        Err::Error(e) | Err::Failure(e) => io::Error::new(
+            io::ErrorKind::NotFound,
+            NomError::new(convert_error(&line, e)),
+        ),
+    })?;
+    Ok(line)
+}
+
 fn run() -> io::Result<()> {
     let options = Options::from_args();
     let mut file = OpenOptions::new().read(true).write(true).open(HOSTS_FILE)?;
@@ -86,15 +97,12 @@ fn run() -> io::Result<()> {
     let mut reader = io::BufReader::new(file);
     for line in reader.lines() {
         let line: String = line?;
-        let host_line = hosts_line::<VerboseError<&str>>(&line).map_err(|e| match e {
-            Err::Incomplete(_) => io::Error::from(io::ErrorKind::NotFound),
-            Err::Error(e) | Err::Failure(e) => io::Error::new(
-                io::ErrorKind::NotFound,
-                NomError::new(convert_error(&line, e)),
-            ),
-        })?;
-        dbg!(&host_line);
-        drop(host_line);
+        match parse_line(&line) {
+            Ok(host_line) => {
+                dbg!(&host_line);
+            }
+            Err(e) => println!("error parsing line: '{}'\n{}", line, e),
+        }
     }
     Ok(())
 }
