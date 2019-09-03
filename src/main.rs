@@ -9,10 +9,10 @@ use std::{
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{digit1, hex_digit1, space1},
-    combinator::{map_res, opt, recognize},
-    error::{convert_error, ParseError, VerboseError},
-    multi::many_m_n,
+    character::complete::{alphanumeric1, digit1, hex_digit1, space1},
+    combinator::{map_res, opt, recognize, rest},
+    error::{convert_error, make_error, ErrorKind, ParseError, VerboseError},
+    multi::{many_m_n, separated_list},
     sequence::{preceded, tuple},
     Err, IResult,
 };
@@ -61,6 +61,8 @@ struct Options {
 #[derive(Debug)]
 struct Line {
     ip: IpAddr,
+    canonical_hostname: String,
+    aliases: Vec<String>,
 }
 
 fn octet<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, u8, E> {
@@ -92,9 +94,44 @@ fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, IpAdd
     map_res(alt((ip_v4_addr, ip_v6_addr)), |s: &str| s.parse::<IpAddr>())(input)
 }
 
+fn hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
+    let (input, hostname) = alphanumeric1(input)?;
+    if let Some(first_char) = hostname.chars().nth(0) {
+        if !first_char.is_alphabetic() {
+            return Err(Err::Error(make_error(&hostname[0..1], ErrorKind::Alpha)));
+        }
+    }
+    Ok((input, hostname))
+}
+
+fn aliases<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Vec<String>, E> {
+    let (input, _) = space1(input)?;
+    let (input, aliases) = separated_list(tag(" "), hostname)(input)?;
+    Ok((input, aliases.into_iter().map(String::from).collect()))
+}
+
+fn comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, (), E> {
+    let (input, _) = preceded(tag("#"), rest)(input)?;
+    Ok((input, ()))
+}
+
 fn hosts_line<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Line, E> {
     let (input, ip) = ip_addr(input)?;
-    Ok((input, Line { ip }))
+    let (input, _) = space1(input)?;
+    let (input, canonical_hostname) = hostname(input)?;
+    let (input, aliases) = opt(aliases)(input)?;
+    let (input, _) = opt(comment)(input)?;
+
+    let canonical_hostname = String::from(canonical_hostname);
+    let aliases = aliases.unwrap_or_else(Vec::new);
+    Ok((
+        input,
+        Line {
+            ip,
+            canonical_hostname,
+            aliases,
+        },
+    ))
 }
 
 fn parse_line(line: &str) -> io::Result<Line> {
@@ -105,6 +142,7 @@ fn parse_line(line: &str) -> io::Result<Line> {
             NomError::new(convert_error(&line, e)),
         ),
     })?;
+
     Ok(line)
 }
 
@@ -112,7 +150,7 @@ fn run() -> io::Result<()> {
     let options = Options::from_args();
     let mut file = OpenOptions::new().read(true).write(true).open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
-    let mut reader = io::BufReader::new(file);
+    let reader = io::BufReader::new(file);
     for line in reader.lines() {
         let line: String = line?;
         match parse_line(&line) {
