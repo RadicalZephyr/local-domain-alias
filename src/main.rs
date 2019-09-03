@@ -225,7 +225,6 @@ fn parse_line(line: &str) -> Line {
     match hosts_line::<(&str, ErrorKind)>(&line) {
         Ok((_, hosts_line)) => Line::Structured(hosts_line),
         Err(_error) => Line::Unstructured(String::from(line)),
-        // Err::Error(_) | Err::Failure(_) => Line::Unstructured(String::from(line)),
     }
 }
 
