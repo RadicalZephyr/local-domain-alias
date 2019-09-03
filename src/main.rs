@@ -11,8 +11,8 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{alphanumeric1, digit1, hex_digit1, one_of, space1},
-    combinator::{map_res, opt, recognize, rest},
-    error::{make_error, ErrorKind, ParseError, VerboseError},
+    combinator::{all_consuming, map_res, opt, recognize, rest},
+    error::{convert_error, make_error, ErrorKind, ParseError, VerboseError},
     multi::{many1, many_m_n, separated_list},
     sequence::{preceded, tuple},
     Err, IResult,
@@ -69,6 +69,10 @@ fn hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a 
         }
     }
     Ok((input, hostname))
+}
+
+fn check_hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, (), E> {
+    all_consuming(hostname)(input).map(|(input, _)| (input, ()))
 }
 
 fn aliases<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, Vec<String>, E> {
@@ -186,11 +190,23 @@ impl fmt::Display for Line {
 }
 
 fn parse_line(line: &str) -> Line {
-    match hosts_line::<VerboseError<&str>>(&line) {
+    match hosts_line::<(&str, ErrorKind)>(&line) {
         Ok((_, hosts_line)) => Line::Structured(hosts_line),
         Err(_error) => Line::Unstructured(String::from(line)),
         // Err::Error(_) | Err::Failure(_) => Line::Unstructured(String::from(line)),
     }
+}
+
+fn validate_alias(alias: &str) -> io::Result<()> {
+    check_hostname::<VerboseError<&str>>(alias)
+        .map(|_| ())
+        .map_err(|error| match error {
+            Err::Incomplete(_) => io::Error::new(io::ErrorKind::InvalidInput, "input incomplete"),
+            Err::Error(e) | Err::Failure(e) => io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid alias format\n{}", convert_error(alias, e)),
+            ),
+        })
 }
 
 fn write_iptables_rules(options: &Options) -> io::Result<()> {
@@ -240,6 +256,7 @@ fn next_unused_local_ip(in_use_ips: &HashSet<IpAddr>) -> IpAddr {
 
 fn run() -> io::Result<()> {
     let options = Options::from_args();
+    validate_alias(&options.alias)?;
 
     let mut file = File::open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
@@ -290,5 +307,23 @@ fn main() {
             eprintln!("local-domain-alias: error: {}", err);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hostname() {
+        assert!(hostname::<(&str, ErrorKind)>("123").is_err());
+        assert!(hostname::<(&str, ErrorKind)>("a123").is_ok());
+        assert!(hostname::<(&str, ErrorKind)>("abc def").is_ok());
+    }
+
+    #[test]
+    fn parse_check_hostname() {
+        assert!(check_hostname::<(&str, ErrorKind)>("abc def").is_err());
+        assert!(check_hostname::<(&str, ErrorKind)>("abc-def").is_ok());
     }
 }
