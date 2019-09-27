@@ -292,16 +292,16 @@ fn run() -> Result<(), Error> {
     let mut file = OpenOptions::new().write(true).open(HOSTS_FILE)?;
     file.seek(io::SeekFrom::Start(0))?;
 
-    if lines
+    let structured_refs: Vec<_> = lines
         .iter()
         .filter_map(|line| line.structured_ref())
+        .collect();
+    if structured_refs
+        .iter()
         .find(|&x| *x.canonical_hostname == options.alias)
         .is_none()
     {
-        let in_use_ips: HashSet<IpAddr> = lines
-            .iter()
-            .filter_map(|line| line.structured_ref().map(|line| line.ip))
-            .collect();
+        let in_use_ips: HashSet<IpAddr> = structured_refs.iter().map(|line| line.ip).collect();
         let ip = next_unused_local_ip(&in_use_ips);
         lines.push(Line::structured(ip, options.alias.clone()));
     } else {
