@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fmt,
     fs::{File, OpenOptions},
-    io::{self, prelude::*},
+    io::{self, prelude::*, BufRead, Cursor},
     net::{IpAddr, Ipv4Addr},
     process::Command,
 };
@@ -234,6 +234,35 @@ fn validate_alias(alias: &str) -> Result<(), Error> {
         })
 }
 
+fn iptables_rules_exist(options: &Options) -> Result<bool, Error> {
+    let rule_match = format!(
+        "-A OUTPUT -s 127.0.0.1/32 -d {alias}/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:",
+        alias = options.alias,
+    );
+    let output = Command::new("iptables")
+        .args(&["-t", "nat", "-S"])
+        .output()?;
+    let stdout = Cursor::new(output.stdout);
+    let matched_lines: Vec<_> = stdout
+        .lines()
+        .filter_map(|line_ret| {
+            line_ret.ok().and_then(|line| {
+                let line: String = line;
+                line.rfind(&rule_match).map(|index| (index, line))
+            })
+        })
+        .collect();
+    let port = format!("{}", options.port);
+    if let Some((idx, line)) = matched_lines.first() {
+        if line[*idx..] == port {
+            return Ok(true);
+        } else {
+            return Err(Error::AliasAlreadyInUse);
+        }
+    }
+    Ok(false)
+}
+
 fn write_iptables_rules(options: &Options) -> Result<(), Error> {
     let status = Command::new("iptables")
         .args(&[
@@ -314,7 +343,9 @@ fn run() -> Result<(), Error> {
     file.sync_all()?;
     drop(file);
 
-    write_iptables_rules(&options)?;
+    if !iptables_rules_exist(&options)? {
+        write_iptables_rules(&options)?;
+    }
 
     Ok(())
 }
