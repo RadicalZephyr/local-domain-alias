@@ -96,7 +96,7 @@ fn ip_addr<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, IpAdd
 fn hostname<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
     recognize(tuple((
         alpha1,
-        many0(alt((alphanumeric1, recognize(one_of("-"))))),
+        many0(alt((alphanumeric1, recognize(one_of("-."))))),
     )))(input)
 }
 
