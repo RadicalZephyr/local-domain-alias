@@ -305,7 +305,7 @@ fn run() -> Result<(), Error> {
         let ip = next_unused_local_ip(&in_use_ips);
         lines.push(Line::structured(ip, options.alias.clone()));
     } else {
-        return Err(Error::AliasAlreadyInUse);
+        eprintln!("Alias already in /etc/hosts not adding a second entry");
     }
 
     for line in &lines {
