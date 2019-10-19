@@ -32,6 +32,9 @@ struct Options {
 
     #[structopt(name = "alias")]
     alias: String,
+
+    #[structopt(skip)]
+    ip: Option<u8>,
 }
 
 #[derive(Debug, Fail)]
@@ -236,7 +239,7 @@ fn validate_alias(alias: &str) -> Result<(), Error> {
 
 fn iptables_rules_exist(options: &Options) -> Result<bool, Error> {
     let rule_match = format!(
-        "-A OUTPUT -s 127.0.0.1/32 -d {alias}/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:",
+        "-A OUTPUT -s 127.0.0.1/32 -d {alias}/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.",
         alias = options.alias,
     );
     let output = Command::new("iptables")
@@ -247,14 +250,14 @@ fn iptables_rules_exist(options: &Options) -> Result<bool, Error> {
         .lines()
         .filter_map(|line_ret| {
             line_ret.ok().and_then(|line| {
-                let line: String = line;
-                line.rfind(&rule_match).map(|index| (index, line))
+                let line: String = dbg!(line);
+                line.rfind(&rule_match).map(|index| dbg!((index, line)))
             })
         })
         .collect();
     let port = options.port.to_string();
     if let Some((idx, line)) = matched_lines.first() {
-        if line[*idx..] == port {
+        if dbg!(&line[*idx..]) == port {
             return Ok(true);
         } else {
             return Err(Error::AliasAlreadyInUse);
@@ -281,7 +284,7 @@ fn write_iptables_rules(options: &Options) -> Result<(), Error> {
             "--jump",
             "DNAT",
             "--to-destination",
-            &format!("127.0.0.1:{}", options.port),
+            &format!("127.0.0.{ip}:{port}", ip = "1", port = options.port),
         ])
         .status()?;
     if !status.success() {
