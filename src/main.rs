@@ -240,7 +240,7 @@ fn iptables_rules_exist(options: &Options) -> Result<bool, Error> {
         alias = options.alias,
     );
     let output = Command::new("iptables")
-        .args(&["-t", "nat", "-S"])
+        .args(&["-t", "nat", "-S", "OUTPUT"])
         .output()?;
     let stdout = Cursor::new(output.stdout);
     let matched_lines: Vec<_> = stdout
