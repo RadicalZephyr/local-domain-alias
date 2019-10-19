@@ -252,7 +252,7 @@ fn iptables_rules_exist(options: &Options) -> Result<bool, Error> {
             })
         })
         .collect();
-    let port = format!("{}", options.port);
+    let port = options.port.to_string();
     if let Some((idx, line)) = matched_lines.first() {
         if line[*idx..] == port {
             return Ok(true);
